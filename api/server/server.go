@@ -588,14 +588,14 @@ func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
 		bytes.NewBuffer(body),
 	)
 	if err != nil {
-		utils.HttpError(w, http.StatusBadGateway, "failed to send message: "+err.Error())
+		utils.HttpError(w, http.StatusInternalServerError, "failed to send message: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		utils.HttpError(w, http.StatusBadGateway, "webhook error: "+string(respBody))
+		utils.HttpError(w, http.StatusInternalServerError, "webhook error: "+string(respBody))
 		return
 	}
 
