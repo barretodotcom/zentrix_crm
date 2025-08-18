@@ -546,9 +546,10 @@ type sendMessageReq struct {
 }
 
 type whatsappSendPayload struct {
-	To   string `json:"to"`
-	Type string `json:"type"`
-	Text string `json:"text"`
+	To       string `json:"to"`
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	ClientId string `json:"clientId"`
 }
 
 func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
@@ -577,9 +578,10 @@ func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
 	// Aqui você pode buscar o número do cliente no banco, se necessário.
 	// Para este exemplo, assumimos que ClientID já é o número de telefone.
 	payload := whatsappSendPayload{
-		To:   c.PhoneNumber,
-		Type: "text",
-		Text: req.Message,
+		To:       c.PhoneNumber,
+		Type:     "text",
+		Text:     req.Message,
+		ClientId: c.ID,
 	}
 
 	body, _ := json.Marshal(payload)
