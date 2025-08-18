@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -582,7 +583,13 @@ func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body, _ := json.Marshal(payload)
-	resp, err := http.Post(
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr}
+
+	resp, err := client.Post(
 		"https://webhook.dev.zentrix.pro/webhook/rYzLehPzRPuyKRUC/enviar-mensagens/whatsapp-send",
 		"application/json",
 		bytes.NewBuffer(body),
