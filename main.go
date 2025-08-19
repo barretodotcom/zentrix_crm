@@ -78,13 +78,14 @@ func main() {
 			r.Get("/clients", s.ListClients)
 			r.Get("/client/messages/{id}", s.ListClientMessages)
 			r.Get("/meta/oauth/start", s.MetaOAuthStart)
-			r.Get("/meta/oauth/callback", s.MetaOAuthCallback)
 
 			r.Post("/meta/whatsapp-account", s.UpsertWhatsappAccount)
 
 			// endpoint externo (frontend -> backend -> n8n)
 			r.Post("/messages/send", s.SendMessage)
 		})
+
+		r.Get("/meta/oauth/callback", s.MetaOAuthCallback)
 	})
 
 	r.Group(func(r chi.Router) {

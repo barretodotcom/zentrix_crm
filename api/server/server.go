@@ -331,7 +331,8 @@ func (s *Server) MetaOAuthStart(w http.ResponseWriter, r *http.Request) {
 		url.QueryEscape(s.RedirectURI),
 		url.QueryEscape(state),
 	)
-	http.Redirect(w, r, authURL, http.StatusFound)
+	utils.JsonOK(w, map[string]string{"auth_url": authURL})
+	// http.Redirect(w, r, authURL, http.StatusFound)
 }
 
 // GET /meta/oauth/callback?code=...&state=...
@@ -396,7 +397,10 @@ func (s *Server) MetaOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Redireciona para sua UI com sucesso
-	http.Redirect(w, r, fmt.Sprintf("https://seu-frontend.com/onboarding/sucesso?tenant_id=%s", url.QueryEscape(tenantID)), http.StatusFound)
+	utils.JsonOK(w, map[string]string{
+		"status":  "ok",
+		"message": "WhatsApp conectado com sucesso! Você pode configurar o número de telefone agora.",
+	})
 }
 
 func (s *Server) UpsertWhatsappAccount(w http.ResponseWriter, r *http.Request) {
