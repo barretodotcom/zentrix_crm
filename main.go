@@ -70,6 +70,9 @@ func main() {
 		r.Post("/users", s.CreateUser)
 		r.Post("/auth/login", s.Login)
 
+		// endpoint interno (n8n -> backend -> WS)
+		r.Post("/internal/messages/incoming", s.IncomingMessage)
+
 		r.Group(func(r chi.Router) {
 			r.Use(s.RequireAuth)
 			r.Get("/clients", s.ListClients)
@@ -78,9 +81,6 @@ func main() {
 			r.Get("/meta/oauth/callback", s.MetaOAuthCallback)
 
 			r.Post("/meta/whatsapp-account", s.UpsertWhatsappAccount)
-
-			// endpoint interno (n8n -> backend -> WS)
-			r.Post("/internal/messages/incoming", s.IncomingMessage)
 
 			// endpoint externo (frontend -> backend -> n8n)
 			r.Post("/messages/send", s.SendMessage)
