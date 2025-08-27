@@ -16,3 +16,9 @@ type Client struct {
 	PhoneNumber string    `json:"phoneNumber"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
+
+type WhatsappAccount struct {
+	ID          string `json:"id"`
+	TenantID    string `json:"tenantIdId"`
+	AccessToken string `json:"accessToken"`
+}

@@ -33,6 +33,8 @@ func main() {
 	metaAppID := mustEnv("META_APP_ID")
 	metaSecret := mustEnv("META_APP_SECRET")
 	redirectURI := mustEnv("META_REDIRECT_URI")
+	evolutionUrl := mustEnv("EVOLUTION_URL")
+	evolutionToken := mustEnv("EVOLUTION_TOKEN")
 
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dbURL)
@@ -41,12 +43,14 @@ func main() {
 	}
 
 	s := &server.Server{
-		DB:          pool,
-		JwtSecret:   jwtSecret,
-		MetaAppID:   metaAppID,
-		MetaSecret:  metaSecret,
-		RedirectURI: redirectURI,
-		Hub:         ws.NewHub(),
+		DB:             pool,
+		JwtSecret:      jwtSecret,
+		MetaAppID:      metaAppID,
+		MetaSecret:     metaSecret,
+		RedirectURI:    redirectURI,
+		EvolutionUrl:   evolutionUrl,
+		EvolutionToken: evolutionToken,
+		Hub:            ws.NewHub(),
 	}
 
 	r := chi.NewRouter()
@@ -77,6 +81,8 @@ func main() {
 			r.Use(s.RequireAuth)
 			r.Get("/clients", s.ListClients)
 			r.Get("/client/messages/{id}", s.ListClientMessages)
+			r.Get("/whatsapp/qr-code", s.GetWhatsAppQRCode)
+
 			r.Get("/meta/oauth/start", s.MetaOAuthStart)
 
 			r.Post("/meta/whatsapp-account", s.UpsertWhatsappAccount)

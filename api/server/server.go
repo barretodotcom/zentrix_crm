@@ -19,17 +19,20 @@ import (
 	"github.com/barretodotcom/zentrix_crm/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type Server struct {
-	DB          *pgxpool.Pool
-	JwtSecret   []byte
-	MetaAppID   string
-	MetaSecret  string
-	RedirectURI string
-	Hub         *ws.Hub
+	DB             *pgxpool.Pool
+	JwtSecret      []byte
+	MetaAppID      string
+	MetaSecret     string
+	RedirectURI    string
+	EvolutionUrl   string
+	EvolutionToken string
+	Hub            *ws.Hub
 }
 
 /* ==========================
@@ -101,6 +104,66 @@ func (s *Server) CreateTenant(w http.ResponseWriter, r *http.Request) {
 		Scan(&id, &created)
 	if err != nil {
 		utils.HttpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// 2️⃣ Se não existe, cria instância na Evolution
+	instanceName := "tenant-" + req.Name + "-" + id[:8]
+	payload := map[string]any{
+		"instanceName": instanceName,
+		"qrcode":       true,
+		"webhook": map[string]any{
+			"url":      "https://webhook.dev.zentrix.pro/webhook/message/receive",
+			"byEvents": false,
+			"base64":   true,
+			"events":   []string{"MESSAGES_UPSERT"},
+		},
+		"integration": "WHATSAPP-BAILEYS",
+		"token":       uuid.NewString(), // ou algum token específico por tenant
+	}
+	body, _ := json.Marshal(payload)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	request, _ := http.NewRequest("POST", s.EvolutionUrl+"/instance/create", bytes.NewBuffer(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("apikey", s.EvolutionToken)
+
+	resp, err := client.Do(request)
+	if err != nil {
+		utils.HttpError(w, http.StatusBadGateway, "evolution request error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		utils.HttpError(w, resp.StatusCode, "evolution error: "+string(b))
+		return
+	}
+
+	var evoResp struct {
+		Instance struct {
+			InstanceID string `json:"instanceId"`
+		} `json:"instance"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&evoResp); err != nil {
+		utils.HttpError(w, http.StatusInternalServerError, "invalid evolution response: "+err.Error())
+		return
+	}
+
+	apiKey, err := s.FetchInstanceToken(evoResp.Instance.InstanceID)
+	if err != nil {
+		utils.HttpError(w, http.StatusInternalServerError, "invalid evolution response when fetching token: "+err.Error())
+		return
+	}
+
+	// 3️⃣ Salva no Postgres
+	_, err = s.DB.Exec(r.Context(),
+		`INSERT INTO whatsapp_instances (tenant_id, instance_name, instance_id, api_key, qr_code, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+		id, instanceName, evoResp.Instance.InstanceID, apiKey, "", "disconnected",
+	)
+	if err != nil {
+		utils.HttpError(w, http.StatusInternalServerError, "db insert error: "+err.Error())
 		return
 	}
 
@@ -332,7 +395,6 @@ func (s *Server) MetaOAuthStart(w http.ResponseWriter, r *http.Request) {
 		url.QueryEscape(state),
 	)
 	utils.JsonOK(w, map[string]string{"auth_url": authURL})
-	// http.Redirect(w, r, authURL, http.StatusFound)
 }
 
 // GET /meta/oauth/callback?code=...&state=...
@@ -383,24 +445,102 @@ func (s *Server) MetaOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// - phone_number_id
 	// Isso varia conforme setup do cliente; para simplificar, deixo placeholders.
 	// Você pode guiar o usuário a selecionar o número via UI e depois chamar POST /meta/whatsapp-account.
+	// Depois de obter metaToken.AccessToken
+	userAccounts := struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}{}
 
-	// Salva access_token em whatsapp_accounts (se não existir, cria; se existir, atualiza)
+	// 1. Buscar contas do usuário
+	if err := utils.DoGETJSON(
+		fmt.Sprintf("https://graph.facebook.com/v20.0/me/accounts?access_token=%s", metaToken.AccessToken),
+		&userAccounts,
+	); err != nil {
+		utils.HttpError(w, http.StatusBadGateway, "failed to fetch user accounts: "+err.Error())
+		return
+	}
+
+	if len(userAccounts.Data) == 0 {
+		utils.HttpError(w, http.StatusBadRequest, "nenhuma conta encontrada no Meta")
+		return
+	}
+
+	// Pega a primeira conta (ou você pode pedir para o usuário escolher via UI)
+	businessID := userAccounts.Data[0].ID
+
+	// 2. Buscar WhatsApp Business Account vinculada
+	businessInfo := struct {
+		WhatsAppBusinessAccount struct {
+			ID string `json:"id"`
+		} `json:"whatsapp_business_account"`
+	}{}
+
+	if err := utils.DoGETJSON(
+		fmt.Sprintf("https://graph.facebook.com/v20.0/%s?fields=whatsapp_business_account&access_token=%s",
+			businessID, metaToken.AccessToken),
+		&businessInfo,
+	); err != nil {
+		utils.HttpError(w, http.StatusBadGateway, "failed to fetch WABA: "+err.Error())
+		return
+	}
+
+	wabaID := businessInfo.WhatsAppBusinessAccount.ID
+	if wabaID == "" {
+		utils.HttpError(w, http.StatusBadRequest, "nenhuma WABA vinculada")
+		return
+	}
+
+	// 3. Buscar phone numbers do WABA
+	phoneNumbers := struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+			Verified    string `json:"verified_name"`
+		} `json:"data"`
+	}{}
+
+	if err := utils.DoGETJSON(
+		fmt.Sprintf("https://graph.facebook.com/v20.0/%s/phone_numbers?access_token=%s",
+			wabaID, metaToken.AccessToken),
+		&phoneNumbers,
+	); err != nil {
+		utils.HttpError(w, http.StatusBadGateway, "failed to fetch phone numbers: "+err.Error())
+		return
+	}
+
+	if len(phoneNumbers.Data) == 0 {
+		utils.HttpError(w, http.StatusBadRequest, "nenhum número encontrado na WABA")
+		return
+	}
+
+	// Pega o primeiro número (ou UI para escolher)
+	phoneNumberID := phoneNumbers.Data[0].ID
+
+	// Salva tudo no banco
 	_, err = s.DB.Exec(r.Context(),
 		`INSERT INTO whatsapp_accounts (tenant_id, phone_number, phone_number_id, waba_id, access_token, created_at, updated_at)
-         VALUES ($1,'', '', '', $2, NOW(), NOW())
-		 ON CONFLICT (tenant_id) DO UPDATE SET access_token=EXCLUDED.access_token, updated_at=NOW()`,
-		tenantID, metaToken.AccessToken,
+	 VALUES ($1,$2,$3,$4,$5, NOW(), NOW())
+	 ON CONFLICT (tenant_id) DO UPDATE 
+	   SET access_token=EXCLUDED.access_token, 
+	       phone_number_id=EXCLUDED.phone_number_id, 
+	       waba_id=EXCLUDED.waba_id,
+	       updated_at=NOW()`,
+		tenantID, phoneNumbers.Data[0].DisplayName, phoneNumberID, wabaID, metaToken.AccessToken,
 	)
 	if err != nil {
 		utils.HttpError(w, http.StatusInternalServerError, "persist token: "+err.Error())
 		return
 	}
 
-	// Redireciona para sua UI com sucesso
 	utils.JsonOK(w, map[string]string{
-		"status":  "ok",
-		"message": "WhatsApp conectado com sucesso! Você pode configurar o número de telefone agora.",
+		"status":          "ok",
+		"message":         "WhatsApp conectado com sucesso!",
+		"waba_id":         wabaID,
+		"phone_number_id": phoneNumberID,
 	})
+
 }
 
 func (s *Server) UpsertWhatsappAccount(w http.ResponseWriter, r *http.Request) {
@@ -496,6 +636,7 @@ type IncomingMessagePayload struct {
 	Text      string    `json:"text"`
 	From      string    `json:"from"`
 	Name      string    `json:"name"`
+	Role      string    `json:role`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -504,6 +645,7 @@ type WSMessage struct {
 	Type     string          `json:"type"`
 	ClientId string          `json:"clientId"`
 	TenantID string          `json:"tenantId"`
+	Role     string          `json:"message"`
 	Data     IncomingMessage `json:"data"`
 }
 
@@ -533,6 +675,7 @@ func (s *Server) IncomingMessage(w http.ResponseWriter, r *http.Request) {
 		Type:     msg.Type,
 		TenantID: msg.TenantID,
 		ClientId: msg.Payload.ClientId,
+		Role:     msg.Payload.Role,
 		Data:     msg,
 	}
 
@@ -550,10 +693,13 @@ type sendMessageReq struct {
 }
 
 type whatsappSendPayload struct {
-	To       string `json:"to"`
-	Type     string `json:"type"`
-	Text     string `json:"text"`
-	ClientId string `json:"clientId"`
+	Token        string `json:"token"`
+	To           string `json:"to"`
+	Type         string `json:"type"`
+	Text         string `json:"text"`
+	ClientId     string `json:"clientId"`
+	TenantId     string `json:"tenantId"`
+	InstanceName string `json:"instanceName"`
 }
 
 func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
@@ -568,6 +714,7 @@ func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var c db.Client
+	fmt.Println(req.ClientID)
 	err := s.DB.QueryRow(context.TODO(),
 		`SELECT id, tenant_id, phone_number, name, created_at
          FROM clients
@@ -578,14 +725,40 @@ func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
 		utils.HttpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// var wa db.WhatsappAccount
 
-	// Aqui você pode buscar o número do cliente no banco, se necessário.
-	// Para este exemplo, assumimos que ClientID já é o número de telefone.
+	// err = s.DB.QueryRow(context.TODO(),
+	// 	`SELECT access_token
+	//      FROM whatsapp_accounts
+	//      WHERE tenant_id=$1`,
+	// 	c.TenantId,
+	// ).Scan(&wa.AccessToken)
+	// if err != nil {
+	// 	utils.HttpError(w, http.StatusBadRequest, err.Error())
+	// 	return
+	// }
+
+	var apiKey string
+	var instanceName string
+	err = s.DB.QueryRow(context.TODO(),
+		`SELECT api_key, instance_name
+         FROM whatsapp_instances
+         WHERE tenant_id=$1`,
+		c.TenantId,
+	).Scan(&apiKey, &instanceName)
+	if err != nil {
+		utils.HttpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	payload := whatsappSendPayload{
-		To:       c.PhoneNumber,
-		Type:     "text",
-		Text:     req.Message,
-		ClientId: c.ID,
+		Token:        apiKey,
+		To:           c.PhoneNumber + "@s.whatsapp.net",
+		Type:         "text",
+		Text:         req.Message,
+		ClientId:     c.ID,
+		TenantId:     c.TenantId,
+		InstanceName: instanceName,
 	}
 
 	body, _ := json.Marshal(payload)
@@ -596,7 +769,7 @@ func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Transport: tr}
 
 	resp, err := client.Post(
-		"https://webhook.dev.zentrix.pro/webhook/rYzLehPzRPuyKRUC/enviar-mensagens/whatsapp-send",
+		"https://webhook.dev.zentrix.pro/webhook/KfjISedLsPHOMmC5/enviar-mensagens/whatsapp-send",
 		"application/json",
 		bytes.NewBuffer(body),
 	)
@@ -613,4 +786,110 @@ func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.JsonOK(w, map[string]string{"status": "sent"})
+}
+
+func (s *Server) GetWhatsAppQRCode(w http.ResponseWriter, r *http.Request) {
+	claims := requests.GetClaims(r)
+	if claims == nil {
+		utils.HttpError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	tenantID := claims.TenantID
+
+	type evoReq struct {
+		Action   string `json:"action"`
+		TenantID string `json:"tenantId"`
+	}
+
+	var instanceName string
+	err := s.DB.QueryRow(r.Context(),
+		`SELECT instance_name FROM whatsapp_instances WHERE tenant_id=$1`,
+		tenantID,
+	).Scan(&instanceName)
+	if err != nil {
+		utils.HttpError(w, http.StatusBadRequest, "instance not found for tenant")
+		return
+	}
+	fmt.Println(instanceName)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", s.EvolutionUrl+"/instance/connect/"+instanceName, nil)
+	if err != nil {
+		utils.HttpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Token da sua instância Evolution
+	req.Header.Set("apiKey", s.EvolutionToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		utils.HttpError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		utils.HttpError(w, resp.StatusCode, "evolution error: "+string(b))
+		return
+	}
+
+	// Recebe JSON com QR Code base64
+	var evoResp struct {
+		Code   string `json:"code"` // exemplo: "data:image/png;base64,..."
+		Base64 string `json:"base64"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&evoResp); err != nil {
+		utils.HttpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Retorna para o frontend
+	utils.JsonOK(w, evoResp)
+}
+
+func (s *Server) FetchInstanceToken(instanceID string) (string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	req, err := http.NewRequest("GET",
+		s.EvolutionUrl+"/instance/fetchInstances?instanceId="+instanceID,
+		nil)
+	if err != nil {
+		fmt.Println(err.Error() + " - FetchInstanceToken")
+		return "", err
+	}
+
+	req.Header.Set("accept", "application/json, text/plain, */*")
+	req.Header.Set("apikey", s.EvolutionToken)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		fmt.Println(err.Error() + " - statuscode")
+		return "", fmt.Errorf("evolution error: %s", string(b))
+	}
+	type EvoInstance struct {
+		ID    string `json:"id"`
+		Token string `json:"token"`
+	}
+
+	var evoResp []EvoInstance
+	if err := json.NewDecoder(resp.Body).Decode(&evoResp); err != nil {
+		fmt.Println(err.Error() + " - decoding")
+		println("error decoding evolution response:", err.Error())
+		return "", err
+	}
+
+	if len(evoResp) == 0 {
+		println("nenhuma instância encontrada")
+		return "", fmt.Errorf("nenhuma instância encontrada")
+	}
+	return evoResp[0].Token, nil
 }
