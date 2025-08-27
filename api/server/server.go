@@ -632,21 +632,21 @@ type IncomingMessage struct {
 }
 
 type IncomingMessagePayload struct {
-	ClientId  string    `json:"clientId"`
-	Text      string    `json:"text"`
-	From      string    `json:"from"`
-	Name      string    `json:"name"`
-	Role      string    `json:"senderRole"`
-	CreatedAt time.Time `json:"createdAt"`
+	ClientId   string    `json:"clientId"`
+	Text       string    `json:"text"`
+	From       string    `json:"from"`
+	Name       string    `json:"name"`
+	SenderRole string    `json:"senderRole"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 // payload WS
 type WSMessage struct {
-	Type     string          `json:"type"`
-	ClientId string          `json:"clientId"`
-	TenantID string          `json:"tenantId"`
-	Role     string          `json:"senderRole"`
-	Data     IncomingMessage `json:"data"`
+	Type       string          `json:"type"`
+	ClientId   string          `json:"clientId"`
+	TenantID   string          `json:"tenantId"`
+	SenderRole string          `json:"senderRole"`
+	Data       IncomingMessage `json:"data"`
 }
 
 func (s *Server) IncomingMessage(w http.ResponseWriter, r *http.Request) {
@@ -672,11 +672,11 @@ func (s *Server) IncomingMessage(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Println(msg.TenantID)
 	event := WSMessage{
-		Type:     msg.Type,
-		TenantID: msg.TenantID,
-		ClientId: msg.Payload.ClientId,
-		Role:     msg.Payload.Role,
-		Data:     msg,
+		Type:       msg.Type,
+		TenantID:   msg.TenantID,
+		ClientId:   msg.Payload.ClientId,
+		SenderRole: msg.Payload.SenderRole,
+		Data:       msg,
 	}
 
 	s.Hub.Broadcast(ws.BroadcastOpts{
