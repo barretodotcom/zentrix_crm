@@ -636,7 +636,7 @@ type IncomingMessagePayload struct {
 	Text      string    `json:"text"`
 	From      string    `json:"from"`
 	Name      string    `json:"name"`
-	Role      string    `json:"role"`
+	Role      string    `json:"senderRole"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
