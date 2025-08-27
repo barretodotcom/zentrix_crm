@@ -636,7 +636,7 @@ type IncomingMessagePayload struct {
 	Text      string    `json:"text"`
 	From      string    `json:"from"`
 	Name      string    `json:"name"`
-	Role      string    `json:role`
+	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -645,7 +645,7 @@ type WSMessage struct {
 	Type     string          `json:"type"`
 	ClientId string          `json:"clientId"`
 	TenantID string          `json:"tenantId"`
-	Role     string          `json:"message"`
+	Role     string          `json:"senderRole"`
 	Data     IncomingMessage `json:"data"`
 }
 
