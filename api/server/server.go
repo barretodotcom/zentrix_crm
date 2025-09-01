@@ -281,6 +281,9 @@ type clientResp struct {
 	TenantId    string    `json:"tenantId"`
 	PhoneNumber string    `json:"phoneNumber"`
 	CreatedAt   time.Time `json:"createdAt"`
+	LastMessage string    `json:"lastMessage"`
+	UserId      *string   `json:"userId"`
+	PictureUrl  *string   `json:"pictureUrl"`
 }
 
 type messageResp struct {
@@ -300,7 +303,16 @@ func (s *Server) ListClients(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.DB.Query(r.Context(),
-		`SELECT * FROM clients WHERE tenant_id=$1`, claims.TenantID)
+		`
+		SELECT DISTINCT ON (c.id) 
+			c.*, 
+			COALESCE(m.text, '') as lastMessage
+		FROM clients c
+		LEFT JOIN messages m 
+			ON c.id = m.client_id
+		WHERE c.tenant_id = $1
+		ORDER BY c.id, m.created_at DESC;
+		`, claims.TenantID)
 	if err != nil {
 		utils.HttpError(w, http.StatusInternalServerError, "1: "+err.Error())
 		return
@@ -310,7 +322,7 @@ func (s *Server) ListClients(w http.ResponseWriter, r *http.Request) {
 	clients := []clientResp{}
 	for rows.Next() {
 		var c clientResp
-		if err := rows.Scan(&c.ID, &c.TenantId, &c.PhoneNumber, &c.Name, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.TenantId, &c.PhoneNumber, &c.Name, &c.CreatedAt, &c.UserId, &c.PictureUrl, &c.LastMessage); err != nil {
 			utils.HttpError(w, http.StatusInternalServerError, "2: "+err.Error())
 			return
 		}
@@ -319,6 +331,45 @@ func (s *Server) ListClients(w http.ResponseWriter, r *http.Request) {
 
 	utils.JsonOK(w, clients)
 }
+
+func (s *Server) ListClientsByUser(w http.ResponseWriter, r *http.Request) {
+	claims := requests.GetClaims(r)
+	if claims == nil {
+		utils.HttpError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	rows, err := s.DB.Query(r.Context(),
+		`
+		SELECT DISTINCT ON (c.id) 
+			c.*, 
+			COALESCE(m.text, '') as lastMessage
+		FROM clients c
+		LEFT JOIN messages m 
+			ON c.id = m.client_id
+		WHERE c.tenant_id = $1
+		AND c.user_id = $2
+		ORDER BY c.id, m.created_at DESC;
+		`, claims.TenantID, claims.UserID)
+	if err != nil {
+		utils.HttpError(w, http.StatusInternalServerError, "1: "+err.Error())
+		return
+	}
+	defer rows.Close()
+
+	clients := []clientResp{}
+	for rows.Next() {
+		var c clientResp
+		if err := rows.Scan(&c.ID, &c.TenantId, &c.PhoneNumber, &c.Name, &c.CreatedAt, &c.UserId, &c.PictureUrl, &c.LastMessage); err != nil {
+			utils.HttpError(w, http.StatusInternalServerError, "2: "+err.Error())
+			return
+		}
+		clients = append(clients, c)
+	}
+
+	utils.JsonOK(w, clients)
+}
+
 func (s *Server) ListClientMessages(w http.ResponseWriter, r *http.Request) {
 	claims := requests.GetClaims(r)
 	if claims == nil {

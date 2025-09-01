@@ -80,6 +80,7 @@ func main() {
 		r.Group(func(r chi.Router) {
 			r.Use(s.RequireAuth)
 			r.Get("/clients", s.ListClients)
+			r.Get("/user/clients", s.ListClientsByUser)
 			r.Get("/client/messages/{id}", s.ListClientMessages)
 			r.Get("/whatsapp/qr-code", s.GetWhatsAppQRCode)
 
