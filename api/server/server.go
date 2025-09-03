@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -276,14 +277,15 @@ func (s *Server) SignJWT(tenantID, userID, role string, exp time.Time) (string, 
 }
 
 type clientResp struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	TenantId    string    `json:"tenantId"`
-	PhoneNumber string    `json:"phoneNumber"`
-	CreatedAt   time.Time `json:"createdAt"`
-	LastMessage string    `json:"lastMessage"`
-	UserId      *string   `json:"userId"`
-	PictureUrl  *string   `json:"pictureUrl"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	TenantId        string     `json:"tenantId"`
+	PhoneNumber     string     `json:"phoneNumber"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	LastMessage     string     `json:"lastMessage"`
+	UserId          *string    `json:"userId"`
+	PictureUrl      *string    `json:"pictureUrl"`
+	LastMessageDate *time.Time `json:"lastMessageDate,omitempty"`
 }
 
 type messageResp struct {
@@ -304,14 +306,19 @@ func (s *Server) ListClients(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.DB.Query(r.Context(),
 		`
-		SELECT DISTINCT ON (c.id) 
-			c.*, 
-			COALESCE(m.text, '') as lastMessage
-		FROM clients c
-		LEFT JOIN messages m 
-			ON c.id = m.client_id
-		WHERE c.tenant_id = $1
-		ORDER BY c.id, m.created_at DESC;
+		SELECT *
+			FROM (
+				SELECT DISTINCT ON (c.id)
+					c.*,
+					COALESCE(m.text, '') AS lastMessage,
+					m.created_at AS lastMessageDate
+				FROM clients c
+				LEFT JOIN messages m 
+					ON c.id = m.client_id
+				WHERE c.tenant_id = $1
+				ORDER BY c.id, m.created_at DESC
+			) sub
+		ORDER BY sub.lastMessageDate DESC NULLS LAST;
 		`, claims.TenantID)
 	if err != nil {
 		utils.HttpError(w, http.StatusInternalServerError, "1: "+err.Error())
@@ -322,7 +329,7 @@ func (s *Server) ListClients(w http.ResponseWriter, r *http.Request) {
 	clients := []clientResp{}
 	for rows.Next() {
 		var c clientResp
-		if err := rows.Scan(&c.ID, &c.TenantId, &c.PhoneNumber, &c.Name, &c.CreatedAt, &c.UserId, &c.PictureUrl, &c.LastMessage); err != nil {
+		if err := rows.Scan(&c.ID, &c.TenantId, &c.PhoneNumber, &c.Name, &c.CreatedAt, &c.UserId, &c.PictureUrl, &c.LastMessage, &c.LastMessageDate); err != nil {
 			utils.HttpError(w, http.StatusInternalServerError, "2: "+err.Error())
 			return
 		}
@@ -341,15 +348,20 @@ func (s *Server) ListClientsByUser(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.DB.Query(r.Context(),
 		`
-		SELECT DISTINCT ON (c.id) 
-			c.*, 
-			COALESCE(m.text, '') as lastMessage
-		FROM clients c
-		LEFT JOIN messages m 
-			ON c.id = m.client_id
-		WHERE c.tenant_id = $1
-		AND c.user_id = $2
-		ORDER BY c.id, m.created_at DESC;
+		SELECT *
+			FROM (
+				SELECT DISTINCT ON (c.id)
+					c.*,
+					COALESCE(m.text, '') AS lastMessage,
+					m.created_at AS lastMessageDate
+				FROM clients c
+				LEFT JOIN messages m 
+					ON c.id = m.client_id
+				WHERE c.tenant_id = $1
+				AND c.user_id = $2
+				ORDER BY c.id, m.created_at DESC
+			) sub
+		ORDER BY sub.lastMessageDate DESC NULLS LAST;;
 		`, claims.TenantID, claims.UserID)
 	if err != nil {
 		utils.HttpError(w, http.StatusInternalServerError, "1: "+err.Error())
@@ -360,7 +372,7 @@ func (s *Server) ListClientsByUser(w http.ResponseWriter, r *http.Request) {
 	clients := []clientResp{}
 	for rows.Next() {
 		var c clientResp
-		if err := rows.Scan(&c.ID, &c.TenantId, &c.PhoneNumber, &c.Name, &c.CreatedAt, &c.UserId, &c.PictureUrl, &c.LastMessage); err != nil {
+		if err := rows.Scan(&c.ID, &c.TenantId, &c.PhoneNumber, &c.Name, &c.CreatedAt, &c.UserId, &c.PictureUrl, &c.LastMessage, &c.LastMessageDate); err != nil {
 			utils.HttpError(w, http.StatusInternalServerError, "2: "+err.Error())
 			return
 		}
@@ -383,12 +395,32 @@ func (s *Server) ListClientMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pega query params (com valores padrão)
+	pageStr := r.URL.Query().Get("page")
+	limitStr := r.URL.Query().Get("limit")
+
+	page := 1
+	limit := 20
+	if pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	offset := (page - 1) * limit
+
 	rows, err := s.DB.Query(r.Context(),
 		`SELECT id, tenant_id, client_id, sender_role, text, created_at
          FROM messages
          WHERE tenant_id=$1 AND client_id=$2
-         ORDER BY created_at ASC`,
-		claims.TenantID, clientId)
+         ORDER BY created_at ASC
+         LIMIT $3 OFFSET $4`,
+		claims.TenantID, clientId, limit, offset)
 	if err != nil {
 		utils.HttpError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -405,7 +437,25 @@ func (s *Server) ListClientMessages(w http.ResponseWriter, r *http.Request) {
 		messages = append(messages, m)
 	}
 
-	utils.JsonOK(w, messages)
+	// Conta total de mensagens (pra saber quantas páginas existem)
+	var total int
+	err = s.DB.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM messages WHERE tenant_id=$1 AND client_id=$2`,
+		claims.TenantID, clientId).Scan(&total)
+	if err != nil {
+		utils.HttpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Retorna no formato paginado
+	response := map[string]interface{}{
+		"page":  page,
+		"limit": limit,
+		"total": total,
+		"data":  messages,
+	}
+
+	utils.JsonOK(w, response)
 }
 
 /* ==========================
