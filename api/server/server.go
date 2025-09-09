@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +23,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -797,6 +800,7 @@ type whatsappSendPayload struct {
 	Token        string `json:"token"`
 	To           string `json:"to"`
 	Type         string `json:"type"`
+	Base64Audio  string `json:"base64"`
 	Text         string `json:"text"`
 	ClientId     string `json:"clientId"`
 	TenantId     string `json:"tenantId"`
@@ -886,6 +890,64 @@ func (s *Server) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	utils.JsonOK(w, map[string]string{"status": "sent"})
+}
+
+func (s *Server) SendAudio(w http.ResponseWriter, r *http.Request) {
+	err := r.ParseMultipartForm(10 << 20)
+	if err != nil {
+		utils.HttpError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
+		return
+	}
+	clientID := r.FormValue("clientId")
+	file, header, err := r.FormFile("audio")
+	if err != nil {
+		utils.HttpError(w, http.StatusBadRequest, "failed to read audio file: "+err.Error())
+		return
+	}
+	defer file.Close()
+	var c db.Client
+	err = s.DB.QueryRow(context.TODO(), `SELECT id, tenant_id, phone_number, name, created_at FROM clients WHERE id=$1`, clientID).
+		Scan(&c.ID, &c.TenantId, &c.PhoneNumber, &c.Name, &c.CreatedAt)
+	if err != nil {
+		utils.HttpError(w, http.StatusBadRequest, "1:"+err.Error())
+		return
+	}
+	url, err := InsertAudioMinIO(file, header, c)
+	if err != nil {
+		utils.HttpError(w, http.StatusBadRequest, "2:"+err.Error())
+		return
+	}
+	var apiKey string
+	var instanceName string
+	err = s.DB.QueryRow(context.TODO(), `SELECT api_key, instance_name FROM whatsapp_instances WHERE tenant_id=$1`, c.TenantId).Scan(&apiKey, &instanceName)
+	if err != nil {
+		utils.HttpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	payload := whatsappSendPayload{
+		Token:        apiKey,
+		To:           c.PhoneNumber + "@s.whatsapp.net",
+		Type:         "audio",
+		Base64Audio:  url,
+		ClientId:     c.ID,
+		TenantId:     c.TenantId,
+		InstanceName: instanceName,
+	}
+	body, _ := json.Marshal(payload)
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	client := &http.Client{Transport: tr}
+	resp, err := client.Post("https://webhook.dev.zentrix.pro/webhook/BXunL9vY4Z1VG990/enviar-mensagens/whatsapp-send", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		utils.HttpError(w, http.StatusInternalServerError, "failed to send message: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		utils.HttpError(w, http.StatusInternalServerError, "webhook error: "+string(respBody))
+		return
+	}
 	utils.JsonOK(w, map[string]string{"status": "sent"})
 }
 
@@ -993,4 +1055,41 @@ func (s *Server) FetchInstanceToken(instanceID string) (string, error) {
 		return "", fmt.Errorf("nenhuma instância encontrada")
 	}
 	return evoResp[0].Token, nil
+}
+
+func InsertAudioMinIO(file multipart.File, header *multipart.FileHeader, client db.Client) (string, error) {
+	endpoint := "omnigest-prd-minio.dde9xb.easypanel.host" // sem https://
+	accessKey := "ikvj0B4G82HbNMeOrg62"
+	secretKey := "dz88HJjPlJCbqAiesXv8q0pv1Q1AsZIM0BwuKSTD"
+	useSSL := true
+
+	minioClient, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: useSSL,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Nome do bucket onde você quer salvar
+	bucketName := "audios"
+	objectName := fmt.Sprintf("%s-%s", client.TenantId, client.ID, header.Filename)
+	contentType := header.Header.Get("Content-Type")
+
+	// Faz o upload para o MinIO
+	_, err = minioClient.PutObject(
+		context.Background(),
+		bucketName,
+		objectName,
+		file,
+		header.Size,
+		minio.PutObjectOptions{ContentType: contentType},
+	)
+	if err != nil {
+		return "", err
+	}
+
+	url := fmt.Sprintf("https://%s/%s/%s", endpoint, bucketName, objectName)
+
+	return url, nil
 }

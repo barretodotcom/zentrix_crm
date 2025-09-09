@@ -69,7 +69,6 @@ func main() {
 
 	// Público
 	r.Route(("/api"), func(r chi.Router) {
-		r.Use(middleware.AllowContentType("application/json"))
 		r.Post("/tenants", s.CreateTenant)
 		r.Post("/users", s.CreateUser)
 		r.Post("/auth/login", s.Login)
@@ -90,6 +89,7 @@ func main() {
 
 			// endpoint externo (frontend -> backend -> n8n)
 			r.Post("/messages/send", s.SendMessage)
+			r.Post("/messages/audio", s.SendAudio)
 		})
 
 		r.Get("/meta/oauth/callback", s.MetaOAuthCallback)
